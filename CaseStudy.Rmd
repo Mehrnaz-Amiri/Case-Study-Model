@@ -15,17 +15,15 @@ library(zoo)
 library(broom)
 ```
 
-###### Valtoco ######
-
 ```{r}
-userName = "MAMIRI"
-Password = "@cZGM2Ya"
+userName = ""
+Password = ""
 
-con <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "nrl_vco_hcp")
+con <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "", UID = userName, PWD = Password, Database = "", Warehouse = "", Schema = "")
 
-con2 <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "nrl_vco_hcp")
+con2 <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "", UID = userName, PWD = Password, Database = "", Warehouse = "", Schema = "")
 
-con_model <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "NRL_VCO_HCP_MODELS")
+con_model <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "", UID = userName, PWD = Password, Database = "", Warehouse = "", Schema = "")
 ```
 
 ```{r}
@@ -194,7 +192,7 @@ act2_b$Exposure <- ifelse(act2_b$ACTIVITY_CATEGORY == "Exposure", 1, 0)
 act2_b$Engagement <- ifelse(act2_b$ACTIVITY_CATEGORY == "Engagement", 1, 0)
 act2_b$view_web <- ifelse(act2_b$ACTIVITY_TYPE == "View" & act2_b$TACTIC == 'Web', 1, 0)
 
-act2_b$VENDOR <- ifelse(act2_b$VENDOR == "Valtoco", "", act2_b$VENDOR)
+act2_b$VENDOR <- ifelse(act2_b$VENDOR == "", "", act2_b$VENDOR)
 act2_b <- act2_b %>% filter(VENDOR!= 0)
 
 p_b <- sqldf("SELECT FP_CUST_ID, ASSET_ID, ACTIVITY_DATE,
@@ -2080,15 +2078,15 @@ case9
 ```
 
 ```{r}
-cases_valtoco <- rbind(case1, case1.1, case1.2, case1.3, case2, case3, case3.1, case3.2, case4, case5, case5.1, case5.2, case6, case6.1, case7, case8, case9)
-names(cases_valtoco) <- toupper(names(cases_valtoco))
-cases_valtoco[,c(6:40)][is.na(cases_valtoco[,c(6:40)])] <- ""
+cases <- rbind(case1, case1.1, case1.2, case1.3, case2, case3, case3.1, case3.2, case4, case5, case5.1, case5.2, case6, case6.1, case7, case8, case9)
+names(cases) <- toupper(names(cases))
+cases[,c(6:40)][is.na(cases[,c(6:40)])] <- ""
 #cases[,c(5)][is.nan(cases[,c(5)])] <- 0
-cases_valtoco
+cases
 ```
 
 ```{r}
-write.csv(cases_valtoco, '~/Desktop/CaseStudy_Valtoco_10-12-23.csv', row.names = FALSE)
+write.csv(cases, '~/Desktop/', row.names = FALSE)
 ```
 
 
