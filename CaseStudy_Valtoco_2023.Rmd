@@ -1,0 +1,2094 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(DBI)
+library(dplyr)
+library(odbc)
+library(data.table)
+library(lubridate)
+library(sqldf)
+library(Hmisc)
+library(zoo)
+library(broom)
+```
+
+###### Valtoco ######
+
+```{r}
+userName = "MAMIRI"
+Password = "@cZGM2Ya"
+
+con <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "nrl_vco_hcp")
+
+con2 <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "nrl_vco_hcp")
+
+con_model <- DBI::dbConnect(odbc::odbc(), Driver = "Snowflake", Server = "fp.snowflakecomputing.com", UID = userName, PWD = Password, Database = "ELV_NEURELIS", Warehouse = "test_artemis_shift_wh", Schema = "NRL_VCO_HCP_MODELS")
+```
+
+```{r}
+start_date <- "2020-02-01"
+end_date <- "2023-09-01"
+
+activity <- dbGetQuery(con, 'select * from "ACTIVITY_NPP_ALL"')
+
+act2 <- activity %>% filter(FP_CUST_ID != "")
+m <- as.POSIXct(act2$ACTIVITY_DATE,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+h <- ymd_hms(m)
+act2$ACTIVITY_DATE <- as.Date(h, format = "Y-m-d")
+
+act2$VENDOR <- ifelse(act2$VENDOR == "Valtoco", "", act2$VENDOR)
+act2 <- act2 %>% filter(VENDOR!= 0)
+
+act2$Exposure <- ifelse(act2$ACTIVITY_CATEGORY == "Exposure", 1, 0)
+act2$Engagement <- ifelse(act2$ACTIVITY_CATEGORY == "Engagement", 1, 0)
+act2$view_web <- ifelse(act2$ACTIVITY_TYPE == "View" & act2$TACTIC == 'Web', 1, 0)
+
+p <- sqldf("SELECT FP_CUST_ID, ASSET_ID, ACTIVITY_DATE,
+        sum(DISTINCT(Exposure)) as Exposure, 
+        sum(DISTINCT(Engagement)) as Engagement,
+        sum(DISTINCT(view_web)) as View_Web
+      	from act2
+        group by FP_CUST_ID, ASSET_ID, ACTIVITY_DATE")
+
+p$ACTIVITY_DATE <- gsub("-", "/", p$ACTIVITY_DATE)
+p2b <- sqldf("SELECT FP_CUST_ID,
+        min(case when Exposure > 0 then ACTIVITY_DATE else 'NA' end) as First_Exposure_Date,
+        min(case when Engagement > 0 then ACTIVITY_DATE else 'NA' end) as First_Engagement_Date
+      	from p
+        group by FP_CUST_ID")
+
+l <- as.POSIXct(p2b$First_Exposure_Date,format="%Y/%m/%d")
+g <- ymd(l)
+p2b$First_Exposure_Date <- as.Date(g, format = "Y-m-d")
+
+l2 <- as.POSIXct(p2b$First_Engagement_Date,format="%Y/%m/%d")
+g2 <- ymd(l2)
+p2b$First_Engagement_Date <- as.Date(g2, format = "Y-m-d")
+
+p$act_date <- format(as.Date(p$ACTIVITY_DATE), "%Y-%m")
+k <- ym(p$act_date)
+p$act_date <- as.Date(k , format = "%Y-%m")
+
+p2 <- sqldf("SELECT FP_CUST_ID,act_date,
+        sum(Exposure) as Exposure,
+        sum(Engagement) as Engagement,
+        sum(View_Web) as View_Web
+      	from p
+        group by FP_CUST_ID,act_date")
+
+p2 <- p2 %>% filter(as.Date(act_date, format = "Y-m-d") >= start_date & as.Date(act_date, format = "Y-m-d") <= end_date)
+
+pp <- p2 %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(Engagement2 = sum(Engagement, na.rm = TRUE)) 
+
+pp2 <- p2 %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(View_Web2 = sum(View_Web, na.rm = TRUE))
+pp2 <- pp2[,c(3)]
+
+pp3 <- p2 %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(Exposure2 = sum(Exposure, na.rm = TRUE))
+pp3 <- pp3[,c(3)]
+ppp <- cbind(pp, pp2, pp3)
+act <- merge(ppp,p2b, by = 'FP_CUST_ID', all = TRUE)
+
+act <- act %>% filter(Engagement2 > 0 | View_Web2 > 0 | Exposure2 > 0) 
+
+rep <- dbGetQuery(con, 'select * from "ACTIVITY_REP_CALL"')
+n <- as.POSIXct(rep$CALL_DATETIME,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+k <- ymd_hms(n)
+rep$CALL_DATETIME <- as.Date(k, format = "Y-m-d")
+r <- rep %>% group_by(FP_CUST_ID) %>% summarise(First_Call_Date = min(CALL_DATETIME, na.rm = TRUE))
+
+rep$date <- format(as.Date(rep$CALL_DATETIME), "%Y-%m")
+k <- ym(rep$date )
+rep$date <- as.Date(k , format = "%Y-%m")
+# rep[duplicated(rep[,c('CALL_ID')]),]
+rr <- sqldf("SELECT FP_CUST_ID,  date,
+        count(CALL_ID) as Total_Call
+      	from rep
+        group by FP_CUST_ID, date")
+
+rr <- rr %>% filter(as.Date(date, format = "Y-m-d") >= start_date & as.Date(date, format = "Y-m-d") <= end_date)
+
+r2 <- rr %>%  group_by(FP_CUST_ID, date) %>% 
+  summarise(Total_Call2 = sum(Total_Call, na.rm = TRUE))
+rep <- merge(r,r2, by = 'FP_CUST_ID', all = TRUE)
+rep <- rep %>%  filter(Total_Call2 > 0)
+
+rx <- dbGetQuery(con, 'select * from "ACTIVITY_RX_SALES"')
+rx <- rx %>% filter(BRAND_NAME == "VALTOCO")
+tx <- rx %>% group_by(FP_CUST_ID) %>% summarise(First_Rx_Date = min(DATE_ID, na.rm = TRUE))
+rx$date_rx <- format(as.Date(rx$DATE_ID), "%Y-%m")
+k <- ym(rx$date_rx)
+rx$date_rx <- as.Date(k , format = "%Y-%m")
+
+rxx <- sqldf("SELECT FP_CUST_ID, date_rx,
+        sum(TRX_CNT) as TRX_CNT
+      	from rx
+        group by FP_CUST_ID, date_rx")
+
+rxx2 <- rxx %>% filter(as.Date(date_rx, format = "Y-m-d") >= start_date & as.Date(date_rx, format = "Y-m-d") <= end_date)
+
+rx2 <- rxx2 %>%  group_by(FP_CUST_ID, date_rx) %>% 
+  summarise(TRX_CNT2 = sum(TRX_CNT, na.rm = TRUE))
+
+rx <- merge(tx,rx2, by = 'FP_CUST_ID', all = TRUE)
+rx <- rx %>%  filter(TRX_CNT2 > 0)
+
+names(act)[2] <- "date"
+names(rx)[3] <- "date"
+data1 <- full_join(act, rep, by = c("FP_CUST_ID",'date'))
+
+data2 <- full_join(data1, rx, by = c("FP_CUST_ID",'date'))
+
+cm <- dbGetQuery(con_model, 'select * from "RPT_ELEVALT_SUPERSET"')
+cm <- cm[!duplicated(cm[,c('FP_CUST_ID')]),] 
+cm <- cm[,c(2,30,31)]
+cm$NPP_TARGET <- ifelse(cm$NPP_TARGET == "NPP Target", TRUE, FALSE)
+cm$REP_TARGET <- ifelse(cm$REP_TARGET == "Rep Target", TRUE, FALSE)
+
+my_program <- full_join(cm, data2, by = "FP_CUST_ID")
+my_program <- my_program %>% rename(Engagement = Engagement2, View_Web = View_Web2, Exposure = Exposure2, Total_Call = Total_Call2, TRX_CNT = TRX_CNT2)
+my_program[,c(5,6,7,11,13)][is.na(my_program[,c(5,6,7,11,13)])] <- 0
+
+df_monthly <- split(my_program,as.yearmon(my_program$date))
+length(df_monthly)
+table(my_program$date)
+```
+
+
+```{r}
+all <- rbind(df_monthly[[1]],df_monthly[[2]],df_monthly[[3]],df_monthly[[4]],df_monthly[[5]],df_monthly[[6]],df_monthly[[7]],df_monthly[[8]],df_monthly[[9]],df_monthly[[10]],df_monthly[[11]],df_monthly[[12]],df_monthly[[13]],df_monthly[[14]],df_monthly[[15]],df_monthly[[16]],df_monthly[[17]],df_monthly[[18]], df_monthly[[19]], df_monthly[[20]], df_monthly[[21]], df_monthly[[22]], df_monthly[[23]],df_monthly[[24]],df_monthly[[25]],df_monthly[[26]],df_monthly[[27]],df_monthly[[28]],df_monthly[[29]],df_monthly[[30]],df_monthly[[31]],df_monthly[[32]],df_monthly[[33]],df_monthly[[34]],df_monthly[[35]],df_monthly[[36]],df_monthly[[37]],df_monthly[[38]])
+df2 <- my_program[!my_program$FP_CUST_ID %in% all$FP_CUST_ID,]
+nrow(my_program)-nrow(all)
+nrow(df2)
+table(df2$First_Exposure_Date)
+table(df2$First_Engagement_Date)
+
+for (i in 1:length(df_monthly)) {
+  all_year = year(df_monthly[[i]]$date)[1]
+  all_month = month(df_monthly[[i]]$date)[1]
+  rx_date <- df2 %>% filter(year(First_Rx_Date) == all_year & month(First_Rx_Date) == all_month)
+  eng_date <- df2 %>% filter(year(First_Engagement_Date) == all_year & month(First_Engagement_Date) == all_month)
+  call_date <- df2 %>% filter(year(First_Call_Date) == all_year & month(First_Call_Date) == all_month)
+  df_monthly[[i]] = rbind(df_monthly[[i]], rx_date, eng_date, call_date)  
+  
+}
+rx_date
+eng_date
+call_date
+```
+
+
+```{r}
+activity_b <- dbGetQuery(con, 'select * from "ACTIVITY_NPP_ALL"')
+act2_b <- activity_b %>% filter(FP_CUST_ID != "")
+m <- as.POSIXct(act2_b$ACTIVITY_DATE,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+h <- ymd_hms(m)
+act2_b$ACTIVITY_DATE <- as.Date(h, format = "Y-m-d")
+
+act2_b$Exposure <- ifelse(act2_b$ACTIVITY_CATEGORY == "Exposure", 1, 0)
+act2_b$Engagement <- ifelse(act2_b$ACTIVITY_CATEGORY == "Engagement", 1, 0)
+act2_b$view_web <- ifelse(act2_b$ACTIVITY_TYPE == "View" & act2_b$TACTIC == 'Web', 1, 0)
+
+act2_b$VENDOR <- ifelse(act2_b$VENDOR == "Valtoco", "", act2_b$VENDOR)
+act2_b <- act2_b %>% filter(VENDOR!= 0)
+
+p_b <- sqldf("SELECT FP_CUST_ID, ASSET_ID, ACTIVITY_DATE,
+        sum(DISTINCT(Exposure)) as Exposure, 
+        sum(DISTINCT(Engagement)) as Engagement,
+        sum(DISTINCT(view_web)) as View_Web
+      	from act2_b
+        group by FP_CUST_ID, ASSET_ID, ACTIVITY_DATE")
+
+p_b$ACTIVITY_DATE <- gsub("-", "/", p_b$ACTIVITY_DATE)
+p2b_b <- sqldf("SELECT FP_CUST_ID,
+        min(case when Exposure > 0 then ACTIVITY_DATE else 'NA' end) as First_Exposure_Date,
+        min(case when Engagement > 0 then ACTIVITY_DATE else 'NA' end) as First_Engagement_Date
+      	from p_b
+        group by FP_CUST_ID")
+l <- as.POSIXct(p2b_b$First_Exposure_Date,format="%Y/%m/%d")
+g <- ymd(l)
+p2b_b$First_Exposure_Date <- as.Date(g, format = "Y-m-d")
+
+l2 <- as.POSIXct(p2b_b$First_Engagement_Date,format="%Y/%m/%d")
+g2 <- ymd(l2)
+p2b_b$First_Engagement_Date <- as.Date(g2, format = "Y-m-d")
+
+p_b$act_date <- format(as.Date(p_b$ACTIVITY_DATE), "%Y-%m")
+k <- ym(p_b$act_date)
+p_b$act_date <- as.Date(k , format = "%Y-%m")
+
+p2_b <- sqldf("SELECT FP_CUST_ID,act_date,
+        sum(Exposure) as Exposure,
+        sum(Engagement) as Engagement,
+        sum(View_Web) as View_Web
+      	from p_b
+        group by FP_CUST_ID,act_date")
+
+p2_b <- p2_b %>% filter(as.Date(act_date, format = "Y-m-d") >= start_date & as.Date(act_date, format = "Y-m-d") <= end_date)
+
+pp_b <- p2_b %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(Engagement2 = sum(Engagement, na.rm = TRUE)) 
+
+pp2_b <- p2_b %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(View_Web2 = sum(View_Web, na.rm = TRUE))
+pp2_b <- pp2_b[,c(3)]
+
+pp3_b <- p2_b %>% group_by(FP_CUST_ID, act_date) %>% 
+  summarise(Exposure2 = sum(Exposure, na.rm = TRUE))
+pp3_b <- pp3_b[,c(3)]
+ppp_b <- cbind(pp_b, pp2_b, pp3_b)
+act_b <- merge(ppp_b,p2b_b, by = 'FP_CUST_ID', all = TRUE)
+
+act_b <- act_b %>% filter(Engagement2 > 0 | View_Web2 > 0 | Exposure2 > 0) 
+
+rep_b <- dbGetQuery(con, 'select * from "ACTIVITY_REP_CALL"')
+n <- as.POSIXct(rep_b$CALL_DATETIME,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+k <- ymd_hms(n)
+rep_b$CALL_DATETIME <- as.Date(k, format = "Y-m-d")
+r_b <- rep_b %>% group_by(FP_CUST_ID) %>% summarise(First_Call_Date = min(CALL_DATETIME, na.rm = TRUE))
+
+rep_b$date <- format(as.Date(rep_b$CALL_DATETIME), "%Y-%m")
+k <- ym(rep_b$date )
+rep_b$date <- as.Date(k , format = "%Y-%m")
+rr_b <- sqldf("SELECT FP_CUST_ID,  date,
+        count(CALL_ID) as Total_Call
+      	from rep_b
+        group by FP_CUST_ID, date")
+
+rr_b <- rr_b %>% filter(as.Date(date, format = "Y-m-d") >= start_date & as.Date(date, format = "Y-m-d") <= end_date)
+
+r2_b <- rr_b %>%  group_by(FP_CUST_ID, date) %>% 
+  summarise(Total_Call2 = sum(Total_Call, na.rm = TRUE))
+rep_b <- merge(r_b,r2_b, by = 'FP_CUST_ID', all = TRUE)
+rep_b <- rep_b %>%  filter(Total_Call2 > 0)
+
+rx_b <- dbGetQuery(con, 'select * from "ACTIVITY_RX_SALES"')
+rx_b <- rx_b %>% filter(BRAND_NAME == "VALTOCO")
+tx_b <- rx_b %>% group_by(FP_CUST_ID) %>% summarise(First_Rx_Date = min(DATE_ID, na.rm = TRUE))
+rx_b$date_rx <- format(as.Date(rx_b$DATE_ID), "%Y-%m")
+k <- ym(rx_b$date_rx)
+rx_b$date_rx <- as.Date(k , format = "%Y-%m")
+
+rxx_b <- sqldf("SELECT FP_CUST_ID, date_rx,
+        sum(TRX_CNT) as TRX_CNT
+      	from rx_b
+        group by FP_CUST_ID, date_rx")
+
+rxx2_b <- rxx_b %>% filter(as.Date(date_rx, format = "Y-m-d") >= start_date & as.Date(date_rx, format = "Y-m-d") <= end_date)
+
+rx2_b <- rxx2_b %>%  group_by(FP_CUST_ID, date_rx) %>% 
+  summarise(TRX_CNT2 = sum(TRX_CNT, na.rm = TRUE))
+
+rx2_b$TRX_CNT2 <- log(rx2_b$TRX_CNT2)
+
+m.rx <- mean(rx2_b$TRX_CNT2, na.rm = TRUE)
+s.rx <- sd(rx2_b$TRX_CNT2, na.rm = TRUE)
+z.rx <- abs(m.rx - rx2_b$TRX_CNT2)/s.rx
+outlier <- rx2_b$TRX_CNT2[which(z.rx > 3)]
+rx2_b <- rx2_b[-which(rx2_b$TRX_CNT2 %in% outlier),]
+rx2_b$TRX_CNT2 <- exp(rx2_b$TRX_CNT2)
+
+rx_b <- merge(tx_b,rx2_b, by = 'FP_CUST_ID', all = TRUE)
+rx_b <- rx_b %>%  filter(TRX_CNT2 > 0)
+
+names(act_b)[2] <- "date"
+names(rx_b)[3] <- "date"
+data1_b <- full_join(act_b, rep_b, by = c("FP_CUST_ID",'date'))
+data2_b <- full_join(data1_b, rx_b, by = c("FP_CUST_ID",'date'))
+
+
+cm_b <- dbGetQuery(con_model, 'select * from "RPT_ELEVALT_SUPERSET"')
+cm_b <- cm_b[!duplicated(cm[,c('FP_CUST_ID')]),] 
+cm_b <- cm_b[,c(2,30,31)]
+cm_b$NPP_TARGET <- ifelse(cm_b$NPP_TARGET == "NPP Target", TRUE, FALSE)
+cm_b$REP_TARGET <- ifelse(cm_b$REP_TARGET == "Rep Target", TRUE, FALSE)
+
+my_program_b <- full_join(cm_b, data2_b, by = "FP_CUST_ID")
+my_program_b <- my_program_b %>% rename(Engagement = Engagement2, View_Web = View_Web2, Exposure = Exposure2, Total_Call = Total_Call2, TRX_CNT = TRX_CNT2)
+my_program_b[,c(5,6,7,11,13)][is.na(my_program_b[,c(5,6,7,11,13)])] <- 0
+
+df_monthly_b <- split(my_program_b,as.yearmon(my_program_b$date))
+length(df_monthly_b)
+table(my_program_b$date)
+```
+
+
+# Given only targets that are Rep Engaged  (Avg TRx for targets that are NPP Exposed or Engaged - Avg TRx for targets that are not NPP Exposed or Engaged) / (Avg TRx for targets that are not NPP Exposed or Engaged)
+
+```{r}
+case1 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case1) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case1$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case1$CASE_STUDY_ID <- rep(1, (length(df_monthly)))
+case1$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case1$`WHY/STORY`[1] <- 'We can increase the impact to your rep targets'
+case1$DESCRIPTION[1] <- 'Rep Targets-Called On: (TRx for rep targets that are NPP exposed or engaged with calls - TRx for rep targets that are not NPP exposed and engaged with calls)/(TRx for rep targets that are not NPP exposed and engaged with calls), (G1 TRx - G2 TRx)/G2 TRx'
+case1$Measure_Type[1] <- 'Percentage TRx' 
+
+exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 ) %>% filter(Exposure > 0 | Engagement > 0)
+exp
+no_exp <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case1$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case1$`METRIC_MONTH (Avg)`[1] <- x1
+case1$`METRIC_MONTH (Sum)`[1] <- x2
+
+exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 ) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>%  filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+case1$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case1$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case1$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case1$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case1$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case1$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case1$TIMEFRAME[1] <- names(df_monthly[1])
+case1$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case1$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case1$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case1$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case1$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case1$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case1$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case1$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case1$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case1$`WHY/STORY`[i] <- 'We can increase the impact to your rep targets'
+  case1$DESCRIPTION[i] <- 'Rep Targets-Called On: (TRx for rep targets that are NPP exposed or engaged with calls - TRx for rep targets that are not NPP exposed and engaged with calls)/(TRx for rep targets that are not NPP exposed and engaged with calls), (G1 TRx - G2 TRx)/G2 TRx'
+  case1$Measure_Type[i] <- 'Percentage TRx' 
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>%  filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case1$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case1$`METRIC_MONTH (Avg)`[i] <- x1
+  case1$`METRIC_MONTH (Sum)`[i] <- x2
+  case1$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case1$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case1$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case1$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case1$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case1$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case1$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case1$MONTH[i] <- names(df_monthly[i])
+  case1$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case1$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case1$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case1$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case1$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case1$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case1$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case1$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>%  filter(REP_TARGET == TRUE & Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+
+case1$CTD[length(df_monthly)] <- 'Yes'
+case1
+```
+
+```{r}
+case1.1 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case1.1) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case1.1$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case1.1$CASE_STUDY_ID <- rep(1.1, (length(df_monthly)))
+case1.1$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case1.1$`WHY/STORY`[1] <- 'We can increase the impact with who your reps have called on'
+case1.1$DESCRIPTION[1] <- 'Total Universe-Called On: (TRx for cases that are NPP exposed or engaged with calls  - TRx for cases that are not NPP exposed and engaged with calls)/(TRx for cases that are not NPP exposed and engaged with calls), (G1 TRx - G2 TRx)/ G2 TRx'
+case1.1$Measure_Type[1] <- 'Percentage TRx' 
+
+exp <- df_monthly[[1]] %>% filter(Total_Call > 0 ) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>%  filter(Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case1.1$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case1.1$`METRIC_MONTH (Sum)`[1] <- x2
+case1.1$`METRIC_MONTH (Avg)`[1] <- x1
+
+
+exp_b <- df_monthly_b[[1]] %>% filter(Total_Call > 0 ) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>%  filter(Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0)
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case1.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case1.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case1.1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+
+case1.1$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case1.1$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case1.1$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case1.1$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case1.1$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case1.1$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case1.1$TIMEFRAME[1] <- names(df_monthly[1])
+case1.1$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case1.1$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case1.1$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case1.1$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case1.1$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case1.1$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case1.1$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case1.1$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case1.1$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case1.1$`WHY/STORY`[i] <- 'We can increase the impact with who your reps have called on'
+  case1.1$DESCRIPTION[i] <- 'Total Universe-Called On: (TRx for cases that are NPP exposed or engaged with calls  - TRx for cases that are not NPP exposed and engaged with calls)/(TRx for cases that are not NPP exposed and engaged with calls), (G1 TRx - G2 TRx)/ G2 TRx'
+  case1.1$Measure_Type[i] <- 'Percentage TRx'
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(Total_Call > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>%  filter(Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case1.1$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case1.1$`METRIC_MONTH (Avg)`[i] <- x1
+  case1.1$`METRIC_MONTH (Sum)`[i] <- x2
+  case1.1$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case1.1$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case1.1$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case1.1$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case1.1$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case1.1$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case1.1$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case1.1$MONTH[i] <- names(df_monthly[i])
+  case1.1$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case1.1$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case1.1$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case1.1$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case1.1$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case1.1$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case1.1$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case1.1$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(Total_Call > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(Total_Call > 0) %>% filter(Exposure == 0 & Engagement == 0)  
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case1.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case1.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case1.1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+case1.1$CTD[length(df_monthly)] <- 'Yes'
+case1.1
+```
+
+```{r}
+case1.2 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case1.2) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case1.2$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case1.2$CASE_STUDY_ID <- rep(1.2, (length(df_monthly)))
+case1.2$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case1.2$`WHY/STORY`[1] <- 'We can increase the impact to your rep targets (TRx > 0)'
+case1.2$DESCRIPTION[1] <- 'Rep Targets-Called On: (TRx for rep targets that are NPP exposed or engaged with calls and TRx > 0 - TRx for rep targets that are not NPP exposed and engaged with calls and TRx > 0)/(TRx for rep targets that are not NPP exposed and engaged with calls and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+case1.2$Measure_Type[1] <- 'Percentage TRx' 
+
+exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case1.2$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case1.2$`METRIC_MONTH (Avg)`[1] <- x1
+case1.2$`METRIC_MONTH (Sum)`[1] <- x2
+
+exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case1.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case1.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case1.2$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+case1.2$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case1.2$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case1.2$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case1.2$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case1.2$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case1.2$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case1.2$TIMEFRAME[1] <- names(df_monthly[1])
+case1.2$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case1.2$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case1.2$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case1.2$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case1.2$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case1.2$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case1.2$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case1.2$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case1.2$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case1.2$`WHY/STORY`[i] <- 'We can increase the impact to your rep targets (TRx > 0)'
+  case1.2$DESCRIPTION[i] <- 'Rep Targets-Called On: (TRx for rep targets that are NPP exposed or engaged with calls and TRx > 0 - TRx for rep targets that are not NPP exposed and engaged with calls and TRx > 0)/(TRx for rep targets that are not NPP exposed and engaged with calls and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+  case1.2$Measure_Type[i] <- 'Percentage TRx' 
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case1.2$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case1.2$`METRIC_MONTH (Avg)`[i] <- x1
+  case1.2$`METRIC_MONTH (Sum)`[i] <- x2
+  case1.2$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case1.2$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case1.2$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case1.2$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case1.2$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case1.2$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case1.2$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case1.2$MONTH[i] <- names(df_monthly[i])
+  case1.2$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case1.2$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case1.2$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case1.2$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case1.2$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case1.2$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case1.2$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case1.2$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)   
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case1.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case1.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case1.2$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+case1.2$CTD[length(df_monthly)] <- 'Yes'
+case1.2
+```
+
+```{r}
+case1.3 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case1.3) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case1.3$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case1.3$CASE_STUDY_ID <- rep(1.3, (length(df_monthly)))
+case1.3$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case1.3$`WHY/STORY`[1] <- 'We can increase the impact with who your reps have called on (TRx > 0)'
+case1.3$DESCRIPTION[1] <- 'Total Universe-Called On: (TRx for cases that are NPP exposed or engaged with calls and TRx > 0 - TRx for cases that are not NPP exposed and engaged with calls and TRx > 0)/(TRx for cases that are not NPP exposed and engaged with calls and TRx > 0),  (G1 TRx - G2 TRx)/ G2 TRx'
+case1.3$Measure_Type[1] <- 'Percentage TRx' 
+
+exp <- df_monthly[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+
+exp_b <- df_monthly_b[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)
+
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case1.3$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case1.3$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case1.3$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+
+case1.3$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case1.3$`METRIC_MONTH (Avg)`[1] <- x1
+case1.3$`METRIC_MONTH (Sum)`[1] <- x2
+case1.3$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case1.3$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case1.3$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case1.3$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case1.3$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case1.3$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case1.3$TIMEFRAME[1] <- names(df_monthly[1])
+case1.3$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case1.3$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case1.3$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case1.3$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case1.3$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case1.3$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case1.3$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case1.3$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case1.3$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case1.3$`WHY/STORY`[i] <- 'We can increase the impact with who your reps have called on (TRx > 0)'
+  case1.3$DESCRIPTION[i] <- 'Total Universe-Called On: (TRx for cases that are NPP exposed or engaged with calls and TRx > 0 - TRx for cases that are not NPP exposed and engaged with calls and TRx > 0)/(TRx for cases that are not NPP exposed and engaged with calls and TRx > 0),  (G1 TRx - G2 TRx)/ G2 TRx'
+  case1.3$Measure_Type[i] <- 'Percentage TRx' 
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>%  filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case1.3$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case1.3$`METRIC_MONTH (Avg)`[i] <- x1
+  case1.3$`METRIC_MONTH (Sum)`[i] <- x2
+  case1.3$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case1.3$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case1.3$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case1.3$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case1.3$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case1.3$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case1.3$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case1.3$MONTH[i] <- names(df_monthly[i])
+  case1.3$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case1.3$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case1.3$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case1.3$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case1.3$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case1.3$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case1.3$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case1.3$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(Total_Call > 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)   
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case1.3$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case1.3$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case1.3$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+
+case1.3$CTD[length(df_monthly)] <- 'Yes'
+case1.3
+```
+
+# % of targets who had >0 TRx and >0 exposure or engagement prior to first call (i.e., NPP Attributed Prescriber)
+
+
+```{r}
+case2 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case2) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case2$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case2$CASE_STUDY_ID <- rep(2, (length(df_monthly)))
+case2$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case2$`WHY/STORY`[1] <- 'We can drive first Rx of rep targets before rep contact'
+case2$DESCRIPTION[1] <- 'Percentage of targets who had >0 TRx and >0 exposure or engagement prior to first call (i.e., NPP Attributed Prescriber)'
+case2$Measure_Type[1] <- 'Percentage Rep Targets'
+
+e <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter((First_Exposure_Date < First_Rx_Date & First_Rx_Date < First_Call_Date) | (First_Engagement_Date < First_Rx_Date & First_Rx_Date < First_Call_Date))
+
+x1 = round(nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])/nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE)),4)
+x2 = round(nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+
+case2$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case2$`METRIC_MONTH (Avg)`[1] <- x1
+
+e_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter((First_Exposure_Date < First_Rx_Date & First_Rx_Date < First_Call_Date) | (First_Engagement_Date < First_Rx_Date & First_Rx_Date < First_Call_Date))
+
+x1_b = round(nrow(e_b[!duplicated(e_b[,c('FP_CUST_ID')]),])/nrow(df_monthly_b[[1]][!duplicated(df_monthly_b[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE)),4)
+x2_b = round(nrow(e_b[!duplicated(e_b[,c('FP_CUST_ID')]),])/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+
+case2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+case2$`AVG TRX GROUP_1`[1] <- round((sum(e$TRX_CNT, na.rm = T)/nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])),4)
+case2$`Sum TRX GROUP_1`[1] <- round(sum(e$TRX_CNT, na.rm = TRUE),1)
+case2$`COUNTS OF GROUP_1`[1] <- nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])
+case2$TIMEFRAME[1] <- names(df_monthly[1])
+case2$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case2$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case2$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case2$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case2$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case2$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case2$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case2$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case2$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case2$`WHY/STORY`[i] <- 'We can drive first Rx of rep targets before rep contact'
+  case2$DESCRIPTION[i] <- 'Percentage of targets who had >0 TRx and >0 exposure or engagement prior to first call (i.e., NPP Attributed Prescriber)'
+  case2$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  e <- temp %>% filter(REP_TARGET == TRUE) %>% filter((First_Exposure_Date < First_Rx_Date & First_Rx_Date < First_Call_Date) | (First_Engagement_Date < First_Rx_Date & First_Rx_Date < First_Call_Date)) 
+
+  x1 = round(nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])/nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE)),4)
+  x2 = round(nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+
+  case2$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case2$`METRIC_MONTH (Avg)`[i] <- x1
+
+  case2$`AVG TRX GROUP_1`[i] <- round((sum(e$TRX_CNT, na.rm = T)/nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])),4)
+  case2$`Sum TRX GROUP_1`[i] <- round(sum(e$TRX_CNT, na.rm = TRUE),1)
+  case2$`COUNTS OF GROUP_1`[i] <- nrow(e[!duplicated(e[,c('FP_CUST_ID')]),])
+  case2$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case2$MONTH[i] <- names(df_monthly[i])
+  case2$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case2$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case2$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case2$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case2$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case2$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case2$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case2$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  e_b <- temp_b %>% filter(REP_TARGET == TRUE) %>% filter((First_Exposure_Date < First_Rx_Date & First_Rx_Date < First_Call_Date) | (First_Engagement_Date < First_Rx_Date & First_Rx_Date < First_Call_Date)) 
+
+  x1_b = round(nrow(e_b[!duplicated(e_b[,c('FP_CUST_ID')]),])/nrow(temp_b[!duplicated(temp_b[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE)),4)
+  x2_b = round(nrow(e_b[!duplicated(e_b[,c('FP_CUST_ID')]),])/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+
+  case2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+case2$CTD[length(df_monthly)] <- 'Yes'
+case2
+```
+
+# Given targets that are not rep engaged, (Avg TRx for targets that are NPP Exposed or Engaged - Avg TRx for targets that are not NPP Exposed or Engaged) / (Avg TRx for targets that are not NPP Exposed or Engaged)
+
+```{r}
+case3 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case3) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case3$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case3$CASE_STUDY_ID <- rep(3, (length(df_monthly)))
+case3$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case3$`WHY/STORY`[1] <- 'We can also help drive value where there are no rep coverage'
+case3$DESCRIPTION[1] <- 'Given targets that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls - TRx for targets that are not NPP exposed and engaged without calls)/(TRx for targets that are not NPP exposed and engaged without calls), (G1 TRx - G2 TRx)/G2 TRx'
+case3$Measure_Type[1] <- 'Percentage TRx'
+
+exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure == 0 & Engagement == 0) 
+
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case3$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case3$`METRIC_MONTH (Avg)`[1] <- x1
+case3$`METRIC_MONTH (Sum)`[1] <- x2
+
+
+exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure == 0 & Engagement == 0)
+
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case3$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case3$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case3$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+
+case3$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case3$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case3$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case3$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case3$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case3$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case3$TIMEFRAME[1] <- names(df_monthly[1])
+case3$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case3$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case3$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case3$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case3$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case3$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case3$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case3$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case3$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case3$`WHY/STORY`[i] <- 'We can also help drive value where there are no rep coverage'
+  case3$DESCRIPTION[i] <- 'Given targets that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls - TRx for targets that are not NPP exposed and engaged without calls)/(TRx for targets that are not NPP exposed and engaged without calls), (G1 TRx - G2 TRx)/G2 TRx'
+  case3$Measure_Type[i] <- 'Percentage TRx'
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case3$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case3$`METRIC_MONTH (Avg)`[i] <- x1
+  case3$`METRIC_MONTH (Sum)`[i] <- x2
+  case3$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case3$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case3$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case3$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case3$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case3$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case3$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case3$MONTH[i] <- names(df_monthly[i])
+  case3$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case3$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case3$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case3$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case3$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case3$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case3$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case3$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call == 0) %>% filter(Exposure == 0 & Engagement == 0)   
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case3$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case3$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case3$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+case3$CTD[length(df_monthly)] <- 'Yes'
+case3
+```
+
+
+```{r}
+case3.1 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case3.1) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case3.1$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case3.1$CASE_STUDY_ID <- rep(3.1, (length(df_monthly)))
+case3.1$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case3.1$`WHY/STORY`[1] <- 'We can also help drive value where there are no rep coverage for targets (TRx > 0)'
+case3.1$DESCRIPTION[1] <- 'Given targets that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls and TRx > 0 - TRx for targets that are not NPP exposed and engaged without calls and TRx > 0)/(TRx for targets that are not NPP exposed and engaged without calls  and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+case3.1$Measure_Type[1] <- 'Percentage TRx'
+
+exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case3.1$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case3.1$`METRIC_MONTH (Avg)`[1] <- x1
+case3.1$`METRIC_MONTH (Sum)`[1] <- x2
+
+
+exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case3.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case3.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case3.1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+
+case3.1$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case3.1$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case3.1$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case3.1$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case3.1$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case3.1$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case3.1$TIMEFRAME[1] <- names(df_monthly[1])
+case3.1$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case3.1$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case3.1$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case3.1$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case3.1$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case3.1$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case3.1$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case3.1$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case3.1$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case3.1$`WHY/STORY`[i] <- 'We can also help drive value where there are no rep coverage for targets (TRx > 0)'
+  case3.1$DESCRIPTION[i] <- 'Given targets that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls and TRx > 0 - TRx for targets that are not NPP exposed and engaged without calls and TRx > 0)/(TRx for targets that are not NPP exposed and engaged without calls  and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+  case3.1$Measure_Type[i] <- 'Percentage TRx'
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case3.1$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case3.1$`METRIC_MONTH (Avg)`[i] <- x1
+  case3.1$`METRIC_MONTH (Sum)`[i] <- x2
+  case3.1$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case3.1$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case3.1$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case3.1$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case3.1$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case3.1$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case3.1$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case3.1$MONTH[i] <- names(df_monthly[i])
+  case3.1$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case3.1$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case3.1$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case3.1$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case3.1$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case3.1$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case3.1$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case3.1$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(REP_TARGET == TRUE & Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)    
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case3.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case3.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case3.1$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+case3.1$CTD[length(df_monthly)] <- 'Yes'
+case3.1
+```
+
+
+```{r}
+case3.2 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case3.2) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case3.2$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case3.2$CASE_STUDY_ID <- rep(3.2, (length(df_monthly)))
+case3.2$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case3.2$`WHY/STORY`[1] <- 'We can also help drive value where there are no rep coverage ( TRx > 0)'
+case3.2$DESCRIPTION[1] <- 'All that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls and TRx > 0 - TRx for targets that are not NPP exposed and engaged without calls and TRx > 0)/(TRx for targets that are not NPP exposed and engaged without calls and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+case3.2$Measure_Type[1] <- 'Percentage TRx'
+
+exp <- df_monthly[[1]] %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp <- df_monthly[[1]] %>%  filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+
+a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+x1 <- round((a-b)/b,4)
+x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+case3.2$`METRIC_TOTAL_TARGET (Avg)`[1] <- ''
+case3.2$`METRIC_MONTH (Avg)`[1] <- x1
+case3.2$`METRIC_MONTH (Sum)`[1] <- x2
+
+exp_b <- df_monthly_b[[1]] %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+no_exp_b <- df_monthly_b[[1]] %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)
+
+a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+x1_b <- round((a_b-b_b)/b_b,4)
+x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+case3.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- ''
+case3.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+case3.2$`METRIC_MONTH (Sum)_NO_OUTLIERS`[1] <- x2_b
+
+
+case3.2$`AVG TRX GROUP_1`[1] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+case3.2$`AVG TRX GROUP_2`[1] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+case3.2$`Sum TRX GROUP_1`[1] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+case3.2$`Sum TRX GROUP_2`[1] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+case3.2$`COUNTS OF GROUP_1`[1] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+case3.2$`COUNTS OF GROUP_2`[1] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+case3.2$TIMEFRAME[1] <- names(df_monthly[1])
+case3.2$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case3.2$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case3.2$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case3.2$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case3.2$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case3.2$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case3.2$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case3.2$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case3.2$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case3.2$`WHY/STORY`[i] <- 'We can also help drive value where there are no rep coverage ( TRx > 0)'
+  case3.2$DESCRIPTION[i] <- 'All that are not rep engaged, (TRx for targets that are NPP exposed or engaged without calls and TRx > 0 - TRx for targets that are not NPP exposed and engaged without calls and TRx > 0)/(TRx for targets that are not NPP exposed and engaged without calls and TRx > 0), (G1 TRx - G2 TRx)/G2 TRx'
+  case3.2$Measure_Type[i] <- 'Percentage TRx'
+  temp <- rbind(df_monthly[[i]], temp)
+  exp <- temp %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp <- temp %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0) 
+  a <- sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  b <- sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+
+  x1 <- round((a-b)/b,4)
+  x2 = round((sum(exp$TRX_CNT, na.rm = TRUE)-sum(no_exp$TRX_CNT, na.rm = TRUE))/sum(no_exp$TRX_CNT, na.rm = TRUE),4)
+  case3.2$`METRIC_TOTAL_TARGET (Avg)`[i] <- ''
+  case3.2$`METRIC_MONTH (Avg)`[i] <- x1
+  case3.2$`METRIC_MONTH (Sum)`[i] <- x2
+  case3.2$`AVG TRX GROUP_1`[i] <- round((sum(exp$TRX_CNT, na.rm = T)/nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])),4)
+  case3.2$`AVG TRX GROUP_2`[i] <- round((sum(no_exp$TRX_CNT, na.rm = T)/nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])),4)
+  case3.2$`Sum TRX GROUP_1`[i] <- round(sum(exp$TRX_CNT, na.rm = TRUE),1)
+  case3.2$`Sum TRX GROUP_2`[i] <- round(sum(no_exp$TRX_CNT, na.rm = TRUE),1)
+  case3.2$`COUNTS OF GROUP_1`[i] <- nrow(exp[!duplicated(exp[,c('FP_CUST_ID')]),])
+  case3.2$`COUNTS OF GROUP_2`[i] <- nrow(no_exp[!duplicated(no_exp[,c('FP_CUST_ID')]),])
+  case3.2$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case3.2$MONTH[i] <- names(df_monthly[i])
+  case3.2$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case3.2$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case3.2$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case3.2$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case3.2$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case3.2$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case3.2$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case3.2$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  exp_b <- temp_b %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure > 0 | Engagement > 0)
+  no_exp_b <- temp_b %>% filter(Total_Call == 0 & TRX_CNT > 0) %>% filter(Exposure == 0 & Engagement == 0)   
+  a_b <- sum(exp_b$TRX_CNT, na.rm = T)/nrow(exp_b[!duplicated(exp_b[,c('FP_CUST_ID')]),])
+  b_b <- sum(no_exp_b$TRX_CNT, na.rm = T)/nrow(no_exp_b[!duplicated(no_exp_b[,c('FP_CUST_ID')]),])
+
+  x1_b <- round((a_b-b_b)/b_b,4)
+  x2_b = round((sum(exp_b$TRX_CNT, na.rm = TRUE)-sum(no_exp_b$TRX_CNT, na.rm = TRUE))/sum(no_exp_b$TRX_CNT, na.rm = TRUE),4)
+  case3.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- ''
+  case3.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  case3.2$`METRIC_MONTH (Sum)_NO_OUTLIERS`[i] <- x2_b
+}
+case3.2$CTD[length(df_monthly)] <- 'Yes'
+case3.2
+```
+
+# PDE Elevalt Engagements and Exposures ratio to 1 rep call
+
+
+```{r}
+case4 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case4) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case4$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case4$CASE_STUDY_ID <- rep(4, (length(df_monthly)))
+case4$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case4$`WHY/STORY`[1] <- 'How many Exposures or Engagement is equal to a PDE'
+case4$DESCRIPTION[1] <- 'PDE Elevalt engagements and exposures ratio to 1 rep call'
+case4$Measure_Type[1] <- 'Number'
+group1 <- df_monthly[[1]] %>% filter(Total_Call == 0 & TRX_CNT > 0) %>%  filter(Engagement > 0 | Exposure > 0) 
+a1 <- sum(group1$Engagement, na.rm =TRUE)/sum(group1$TRX_CNT, na.rm =TRUE)
+a2 <- sum(group1$Exposure, na.rm =TRUE)/sum(group1$TRX_CNT, na.rm =TRUE)
+group2 <- df_monthly[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>%  filter(Engagement > 0 | Exposure > 0)
+b1 <- sum(group2$Engagement, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+b2 <- sum(group2$Exposure, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+group3 <- df_monthly[[1]] %>% filter(Total_Call > 0 & TRX_CNT > 0) %>%  filter(Engagement == 0 & Exposure == 0)
+c1 <- sum(group3$Total_Call, na.rm =TRUE)/sum(group3$TRX_CNT, na.rm =TRUE)
+c2 <- sum(group2$Total_Call, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+case4$`PDE(Exposure/TRX)`[1] <- round(sum(a2, b2, na.rm = TRUE)/2,2)
+case4$`PDE(Engagement/TRX)`[1] <- round(sum(a1, b1, na.rm = TRUE)/2,2)
+case4$`PDE(CALL/TRX)`[1] <- round(sum(c1, c2, na.rm = TRUE)/2,2)
+Exposure_per_TRX <- round(sum(a2, b2, na.rm = TRUE)/2,2)
+Engagement_per_TRX <- round(sum(a1, b1, na.rm = TRUE)/2,2) 
+Call_per_TRX <- round(sum(c1, c2, na.rm = TRUE)/2,2)
+case4$`PDE(Exposure/Call)`[1] <- round(Exposure_per_TRX/Call_per_TRX,2)
+case4$`PDE(Engagement/Call)`[1] <-round(Engagement_per_TRX/Call_per_TRX,2) 
+
+case4$`AVG TRX GROUP_1`[1] <- round((sum(group1$TRX_CNT, na.rm = T)/nrow(group1[!duplicated(group1[,c('FP_CUST_ID')]),])),4)
+case4$`AVG TRX GROUP_2`[1] <- round((sum(group2$TRX_CNT, na.rm = T)/nrow(group2[!duplicated(group2[,c('FP_CUST_ID')]),])),4)
+case4$`Sum TRX GROUP_1`[1] <- round(sum(group1$TRX_CNT, na.rm = TRUE),1)
+case4$`Sum TRX GROUP_2`[1] <- round(sum(group2$TRX_CNT, na.rm = TRUE),1)
+case4$`COUNTS OF GROUP_1`[1] <- nrow(group1[!duplicated(group1[,c('FP_CUST_ID')]),])
+case4$`COUNTS OF GROUP_2`[1] <- nrow(group2[!duplicated(group2[,c('FP_CUST_ID')]),])
+case4$TIMEFRAME[1] <- names(df_monthly[1])
+case4$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case4$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case4$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case4$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case4$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case4$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case4$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case4$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case4$MONTH[1] <- names(df_monthly[1])
+ 
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case4$`WHY/STORY`[i] <- 'How many Exposures or Engagement is equal to a PDE'
+  case4$DESCRIPTION[i] <- 'PDE Elevalt engagements and exposures ratio to 1 rep call'
+  case4$Measure_Type[i] <- 'Number'
+  temp <- rbind(df_monthly[[i]], temp)
+  group1 <- temp %>% filter(Total_Call == 0 & TRX_CNT > 0) %>%  filter(Engagement > 0 | Exposure > 0) 
+  a1 <- sum(group1$Engagement, na.rm =TRUE)/sum(group1$TRX_CNT, na.rm =TRUE)
+  a2 <- sum(group1$Exposure, na.rm =TRUE)/sum(group1$TRX_CNT, na.rm =TRUE)
+  group2 <- temp %>% filter(Total_Call > 0 & TRX_CNT > 0) %>%  filter(Engagement > 0 | Exposure > 0)
+  b1 <- sum(group2$Engagement, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+  b2 <- sum(group2$Exposure, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+  group3 <- temp %>% filter(Total_Call > 0 & TRX_CNT > 0) %>%  filter(Engagement == 0 & Exposure == 0)
+  c1 <- sum(group3$Total_Call, na.rm =TRUE)/sum(group3$TRX_CNT, na.rm =TRUE)
+  c2 <- sum(group2$Total_Call, na.rm =TRUE)/sum(group2$TRX_CNT, na.rm =TRUE)
+  case4$`PDE(Exposure/TRX)`[i] <- round(sum(a2, b2, na.rm = TRUE)/2,2)
+  case4$`PDE(Engagement/TRX)`[i] <- round(sum(a1, b1, na.rm = TRUE)/2,2)
+  case4$`PDE(CALL/TRX)`[i] <- round(sum(c1, c2, na.rm = TRUE)/2,2)
+  Exposure_per_TRX <- round(sum(a2, b2, na.rm = TRUE)/2,2)
+  Engagement_per_TRX <- round(sum(a1, b1, na.rm = TRUE)/2,2) 
+  Call_per_TRX <- round(sum(c1, c2, na.rm = TRUE)/2,2)
+  case4$`PDE(Exposure/Call)`[i] <- round(Exposure_per_TRX/Call_per_TRX,2)
+  case4$`PDE(Engagement/Call)`[i] <-round(Engagement_per_TRX/Call_per_TRX,2) 
+  case4$`AVG TRX GROUP_1`[i] <- round((sum(group1$TRX_CNT, na.rm = T)/nrow(group1[!duplicated(group1[,c('FP_CUST_ID')]),])),4)
+  case4$`AVG TRX GROUP_2`[i] <- round((sum(group2$TRX_CNT, na.rm = T)/nrow(group2[!duplicated(group2[,c('FP_CUST_ID')]),])),4)
+  case4$`Sum TRX GROUP_1`[i] <- round(sum(group1$TRX_CNT, na.rm = TRUE),1)
+  case4$`Sum TRX GROUP_2`[i] <- round(sum(group2$TRX_CNT, na.rm = TRUE),1)
+  case4$`COUNTS OF GROUP_1`[i] <- nrow(group1[!duplicated(group1[,c('FP_CUST_ID')]),])
+  case4$`COUNTS OF GROUP_2`[i] <- nrow(group2[!duplicated(group2[,c('FP_CUST_ID')]),])
+  case4$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case4$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case4$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case4$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case4$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case4$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case4$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case4$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case4$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+  case4$MONTH[i] <- names(df_monthly[i])
+}
+
+case4$CTD[length(df_monthly)]  <- 'Yes'
+case4
+```
+
+
+# % of Targets that had > 0 NPP impression
+
+```{r}
+case5 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case5) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case5$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case5$CASE_STUDY_ID <- rep(5, (length(df_monthly)))
+case5$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case5$`WHY/STORY`[1] <- 'Are we able to cover the desired rep targets?(Breadth)'
+case5$DESCRIPTION[1] <- 'Number of Rep Targets >0 Exposure or Engagement/Total Targets, G1/G2'
+case5$Measure_Type[1] <- 'Percentage Rep Targets'
+
+x1 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+
+case5$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case5$`METRIC_MONTH (Avg)`[1] <- x1
+
+x1_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+
+case5$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case5$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0)
+g2 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE)
+case5$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case5$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case5$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case5$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case5$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case5$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case5$TIMEFRAME[1] <- names(df_monthly[1])
+case5$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case5$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case5$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case5$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case5$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case5$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case5$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case5$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case5$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case5$`WHY/STORY`[i] <- 'Are we able to cover the desired rep targets?(Breadth)'
+  case5$DESCRIPTION[i] <- 'Number of Rep Targets >0 Exposure or Engagement/Total Targets, G1/G2'
+  case5$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+  
+  case5$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case5$`METRIC_MONTH (Avg)`[i] <- x1
+
+  g1 <- temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0)
+  g2 <- temp %>% filter(REP_TARGET == TRUE)
+  case5$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case5$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case5$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case5$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case5$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case5$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case5$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case5$MONTH[i] <- names(df_monthly[i])
+  case5$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case5$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case5$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case5$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case5$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case5$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case5$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case5$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0 | Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+  
+  case5$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case5$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+case5$CTD[length(df_monthly)]  <- 'Yes'
+case5
+```
+
+
+# % of Targets that had > 0 NPP engagement 
+
+```{r}
+case5.1 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case5.1) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case5.1$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case5.1$CASE_STUDY_ID <- rep(5.1, (length(df_monthly)))
+case5.1$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+case5.1$`WHY/STORY`[1] <- 'How effective is our NPP in engaging targets?'
+case5.1$DESCRIPTION[1] <- 'Number of Rep Targets >0 Engagement/Total Rep Targets, G1/G2'
+case5.1$Measure_Type[1] <- 'Percentage Rep Targets'
+
+x1 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0)  %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+
+case5.1$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case5.1$`METRIC_MONTH (Avg)`[1] <- x1
+
+x1_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0)  %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+
+case5.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case5.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0)
+g2 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE)
+case5.1$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case5.1$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case5.1$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case5.1$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case5.1$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case5.1$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case5.1$TIMEFRAME[1] <- names(df_monthly[1])
+case5.1$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case5.1$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case5.1$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case5.1$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case5.1$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case5.1$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case5.1$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case5.1$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case5.1$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case5.1$`WHY/STORY`[i] <- 'How effective is our NPP in engaging targets?'
+  case5.1$DESCRIPTION[i] <- 'Number of Rep Targets >0 Engagement/Total Rep Targets, G1/G2'
+  case5.1$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+  case5.1$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case5.1$`METRIC_MONTH (Avg)`[i] <- x1
+  g1 <- temp %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0)
+  g2 <- temp %>% filter(REP_TARGET == TRUE)
+  case5.1$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case5.1$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case5.1$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case5.1$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case5.1$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case5.1$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case5.1$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case5.1$MONTH[i] <- names(df_monthly[i])
+  case5.1$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case5.1$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case5.1$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case5.1$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case5.1$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case5.1$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case5.1$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case5.1$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Engagement > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+  case5.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case5.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+
+case5.1$CTD[length(df_monthly)]  <- 'Yes'
+case5.1
+```
+
+
+# How effective is our NPP in exposing targets?
+
+```{r}
+case5.2 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case5.2) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case5.2$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case5.2$CASE_STUDY_ID <- rep(5.2, (length(df_monthly)))
+case5.2$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case5.2$`WHY/STORY`[1] <- 'How effective is our NPP in exposing targets?'
+case5.2$DESCRIPTION[1] <- 'Number of Rep Targets >0 Exposure/Total Rep Targets, G1/G2'
+case5.2$Measure_Type[1] <- 'Percentage Rep Targets'
+
+x1 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+
+case5.2$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case5.2$`METRIC_MONTH (Avg)`[1] <- x1
+
+
+x1_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+
+case5.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case5.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0)
+g2 <- df_monthly[[1]] %>% filter(REP_TARGET == TRUE)
+case5.2$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case5.2$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case5.2$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case5.2$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case5.2$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case5.2$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case5.2$TIMEFRAME[1] <- names(df_monthly[1])
+case5.2$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case5.2$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case5.2$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case5.2$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case5.2$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case5.2$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case5.2$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case5.2$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case5.2$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case5.2$`WHY/STORY`[i] <- 'How effective is our NPP in exposing targets?'
+  case5.2$DESCRIPTION[i] <- 'Number of Rep Targets >0 Exposure/Total Rep Targets, G1/G2'
+  case5.2$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2 = round(nrow(temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),4)
+  case5.2$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case5.2$`METRIC_MONTH (Avg)`[i] <- x1
+  g1 <- temp %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0)
+  g2 <- temp %>% filter(REP_TARGET == TRUE)
+  case5.2$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case5.2$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case5.2$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case5.2$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case5.2$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case5.2$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case5.2$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case5.2$MONTH[i] <- names(df_monthly[i])
+  case5.2$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case5.2$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case5.2$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case5.2$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case5.2$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case5.2$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case5.2$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case5.2$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% filter(Exposure > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),4)
+  case5.2$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case5.2$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+case5.2$CTD[length(df_monthly)]  <- 'Yes'
+case5.2
+```
+
+# % of targets that deeply engage with content (that have > x engagements, where x is a determined threshold known to be optimal for TRx)
+
+```{r}
+text_date <- start_date
+first_date <- ymd(text_date)
+last_date <- first_date + months(12)
+year1 <- my_program %>% filter(ymd(date) < last_date)
+year1 <- year1 %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE),
+                                        Exposure = sum(Exposure, na.rm = TRUE))
+normalize <- function(x){
+  (x-min(x, na.rm = TRUE))/(max(x, na.rm = TRUE)-min(x, na.rm = TRUE))
+}
+
+d <- year1 %>%  filter(TRX_CNT > 0 & Engagement > 0)
+df <- as.data.frame(lapply(d[,c(2,4)], normalize))
+dff <- cbind(d[,c(1,3)],df)
+dff <- dff %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+q <- quantile(dff$metric, na.rm = T)
+d2 <- dff %>% filter(metric >= q[[2]])
+o <- mean(d2$Engagement, na.rm = TRUE)
+
+
+text_date <- start_date
+first_date <- ymd(text_date)
+last_date <- first_date + months(12)
+year1_b <- my_program_b %>% filter(ymd(date) < last_date)
+year1_b <- year1_b %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE),
+                                        Exposure = sum(Exposure, na.rm = TRUE))
+normalize <- function(x){
+  (x-min(x, na.rm = TRUE))/(max(x, na.rm = TRUE)-min(x, na.rm = TRUE))
+}
+
+d <- year1_b %>%  filter(TRX_CNT > 0 & Engagement > 0)
+df <- as.data.frame(lapply(d[,c(2,4)], normalize))
+dff <- cbind(d[,c(1,3)],df)
+dff <- dff %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+q <- quantile(dff$metric, na.rm = T)
+d2 <- dff %>% filter(metric >= q[[2]])
+o_b <- mean(d2$Engagement, na.rm = TRUE)
+```
+
+
+```{r}
+case6 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case6) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case6$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case6$CASE_STUDY_ID <- rep(6, (length(df_monthly)))
+case6$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case6$`WHY/STORY`[1] <- 'Threshold is year1; The content and the way we deliver is interesting and engaging (Depth of Engagement)'
+case6$DESCRIPTION[1] <- 'Percentage of targets that deeply engage with content (that have > x engagements, where x is a determined threshold known to be optimal for TRx: mean engagements of the top 75% of prescribing targets based on normalized TRx and calls)'
+case6$Measure_Type[1] <- 'Percentage Rep Targets'
+
+x1 <- nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+x2 <- nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>%  filter(REP_TARGET == TRUE))
+
+case6$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case6$`METRIC_MONTH (Avg)`[1] <- x1
+
+
+x1_b <- nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+x2_b <- nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE))
+case6$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case6$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o)
+g2 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE)
+case6$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case6$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case6$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case6$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case6$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case6$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case6$TIMEFRAME[1] <- names(df_monthly[1])
+case6$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case6$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case6$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case6$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case6$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case6$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case6$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case6$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case6$MONTH[1] <- names(df_monthly[1])
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case6$`WHY/STORY`[i] <- 'Threshold is year1; The content and the way we deliver is interesting and engaging (Depth of Engagement)'
+  case6$DESCRIPTION[i] <- 'Percentage of targets that deeply engage with content (that have > x engagements, where x is a determined threshold known to be optimal for TRx: mean engagements of the top 75% of prescribing targets based on normalized TRx and calls)'
+  case6$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 <- nrow(temp %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>%  filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+  x2 <- nrow(temp %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>%  filter(REP_TARGET == TRUE))
+
+  case6$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case6$`METRIC_MONTH (Avg)`[i] <- x1
+  
+  g1 <- temp %>%  filter(REP_TARGET == TRUE & Engagement >= o)
+  g2 <- temp %>%  filter(REP_TARGET == TRUE)
+  case6$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case6$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case6$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case6$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case6$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case6$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case6$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case6$MONTH[i] <- names(df_monthly[i])
+  case6$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case6$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case6$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case6$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case6$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case6$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case6$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case6$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b <- nrow(temp_b %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>%  filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+  x2_b <- nrow(temp_b %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>%  filter(REP_TARGET == TRUE))
+
+  case6$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case6$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+  }
+
+case6$CTD[length(df_monthly)]  <- 'Yes'
+case6
+```
+
+
+```{r}
+text_date <- start_date
+first_date <- ymd(text_date)
+last_date <- first_date + months(12)
+year1 <- my_program %>% filter(ymd(date) < last_date)
+year1 <- year1 %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE),
+                                        Exposure = sum(Exposure, na.rm = TRUE))
+reg <- lm(TRX_CNT ~ Engagement + Total_Call + Exposure, year1)
+options(scipen = 999)
+tm <- tidy(reg)
+tm <- as.data.frame(tm)
+case6$coefficient_Engagement[1] <- tm$estimate[2]
+case6$coefficient_Exposure[1] <- tm$estimate[4]
+case6$coefficient_Call[1] <- tm$estimate[3]
+case6$Pvalue_Engagement[1] <- tm$p.value[2]
+case6$Pvalue_Exposure[1] <- tm$p.value[4]
+case6$Pvalue_Call[1] <- tm$p.value[3]
+```
+
+
+```{r}
+case6.1 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case6.1) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case6.1$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case6.1$CASE_STUDY_ID <- rep(6.1, (length(df_monthly)))
+case6.1$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case6.1$`WHY/STORY`[1] <- 'Threshold per month; The content and the way we deliver is interesting and engaging (Depth of Engagement)'
+case6.1$DESCRIPTION[1] <- 'Percentage of targets that deeply engage with content (that have > x engagements, where x is a determined threshold known to be optimal for TRx: mean engagements of the top 75% of prescribing targets based on normalized TRx and calls)'
+case6.1$Measure_Type[1] <- 'Percentage Rep Targets'
+
+d <- df_monthly[[1]] %>%  filter(TRX_CNT > 0 & Engagement > 0)
+d <- d %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE))
+df <- as.data.frame(lapply(d[,c(2,4)], normalize))
+dff <- cbind(d[,c(1,3)],df)
+dff <- dff %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+q <- quantile(dff$metric, na.rm = T)
+d2 <- dff %>% filter(metric >= q[[2]])
+o <- mean(d2$Engagement, na.rm = TRUE)
+
+x1 <- nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+x2 <- nrow(df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>%  filter(REP_TARGET == TRUE))
+
+case6.1$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case6.1$`METRIC_MONTH (Avg)`[1] <- x1
+
+
+d_b <- df_monthly_b[[1]] %>%  filter(TRX_CNT > 0 & Engagement > 0)
+d_b <- d_b %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE))
+df_b <- as.data.frame(lapply(d_b[,c(2,4)], normalize))
+dff_b <- cbind(d_b[,c(1,3)],df_b)
+dff_b <- dff_b %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+q_b <- quantile(dff_b$metric, na.rm = T)
+d2_b <- dff_b %>% filter(metric >= q_b[[2]])
+o_b <- mean(d2_b$Engagement, na.rm = TRUE)
+
+x1_b <- nrow(df_monthly_b[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>%  filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+x2_b <- nrow(df_monthly_b[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>%  filter(REP_TARGET == TRUE))
+
+case6.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case6.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+
+g1 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & Engagement >= o)
+g2 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE)
+case6.1$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case6.1$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case6.1$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case6.1$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case6.1$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case6.1$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case6.1$TIMEFRAME[1] <- names(df_monthly[1])
+case6.1$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case6.1$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case6.1$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case6.1$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case6.1$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case6.1$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case6.1$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case6.1$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case6.1$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case6.1$`WHY/STORY`[i] <- 'Threshold per month; The content and the way we deliver is interesting and engaging (Depth of Engagement)'
+  case6.1$DESCRIPTION[i] <- 'Percentage of targets that deeply engage with content (that have > x engagements, where x is a determined threshold known to be optimal for TRx: mean engagements of the top 75% of prescribing targets based on normalized TRx and calls)'
+  case6.1$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  dd <- temp %>% filter(TRX_CNT > 0 & Engagement > 0)
+  d <- dd %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE))
+  df <- as.data.frame(lapply(d[,c(2,4)], normalize))
+  dff <- cbind(d[,c(1,3)],df)
+  dff <- dff %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+  q <- quantile(dff$metric, na.rm = T)
+  d2 <- dff %>% filter(metric >= q[[2]])
+  o <- mean(d2$Engagement, na.rm = TRUE)
+  x1 <- nrow(temp %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+  x2 <- nrow(temp %>%  filter(REP_TARGET == TRUE & Engagement >= o) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>%  filter(REP_TARGET == TRUE))
+  case6.1$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case6.1$`METRIC_MONTH (Avg)`[i] <- x1
+  g1 <- temp %>%  filter(REP_TARGET == TRUE & Engagement >= o)
+  g2 <- temp %>%  filter(REP_TARGET == TRUE)
+  case6.1$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case6.1$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case6.1$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case6.1$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case6.1$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case6.1$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case6.1$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case6.1$MONTH[i] <- names(df_monthly[i])
+  case6.1$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case6.1$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case6.1$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case6.1$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case6.1$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case6.1$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case6.1$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case6.1$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  dd_b <- temp_b %>% filter(TRX_CNT > 0 & Engagement > 0)
+  d_b <- dd_b %>% group_by(FP_CUST_ID) %>% summarise(TRX_CNT = sum(TRX_CNT, na.rm = TRUE),
+                                        Engagement = sum(Engagement, na.rm = TRUE),
+                                        Total_Call = sum(Total_Call, na.rm = TRUE))
+  df_b <- as.data.frame(lapply(d_b[,c(2,4)], normalize))
+  dff_b <- cbind(d_b[,c(1,3)],df_b)
+  dff_b <- dff_b %>% group_by(FP_CUST_ID) %>% mutate(metric = sum(TRX_CNT, Total_Call, na.rm=T)) %>% arrange(desc(metric))
+  q_b <- quantile(dff_b$metric, na.rm = T)
+  d2_b <- dff_b %>% filter(metric >= q_b[[2]])
+  o_b <- mean(d2_b$Engagement, na.rm = TRUE)
+  x1_b <- nrow(temp_b %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))
+  x2_b <- nrow(temp_b %>%  filter(REP_TARGET == TRUE & Engagement >= o_b) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE))
+  case6.1$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case6.1$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+
+case6.1$CTD[length(df_monthly)]  <- 'Yes'
+case6.1
+```
+
+
+# % of website visitors that are targets/CVPS of website visitors that are targets
+
+```{r}
+case7 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case7) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case7$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case7$CASE_STUDY_ID <- rep(7, (length(df_monthly)))
+case7$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case7$`WHY/STORY`[1] <- 'We can drive rep targets to the website'
+case7$DESCRIPTION[1] <- 'Percentage of rep targets that went to the website, Rep Targets/Total Rep Targets'
+case7$Measure_Type[1] <- 'Percentage Rep Targets'
+
+x1 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),6)
+
+case7$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case7$`METRIC_MONTH (Avg)`[1] <- x1
+
+x1_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),6)
+
+case7$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case7$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & View_Web > 0)
+g2 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE)
+case7$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case7$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case7$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case7$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case7$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case7$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case7$TIMEFRAME[1] <- names(df_monthly[1])
+case7$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case7$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case7$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case7$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case7$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case7$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case7$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case7$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case7$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case7$`WHY/STORY`[i] <- 'We can drive rep targets to the website'
+  case7$DESCRIPTION[i] <- 'Percentage of rep targets that went to the website, Rep Targets/Total Rep Targets'
+  case7$Measure_Type[i] <- 'Percentage Rep Targets'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 = round(nrow(temp %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2 = round(nrow(temp %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm %>% filter(REP_TARGET == TRUE)),6)
+  case7$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case7$`METRIC_MONTH (Avg)`[i] <- x1
+  g1 <- temp %>% filter(REP_TARGET == TRUE & View_Web > 0)
+  g2 <- temp %>% filter(REP_TARGET == TRUE)
+  case7$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case7$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case7$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case7$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case7$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case7$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case7$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case7$MONTH[i] <- names(df_monthly[i])
+  case7$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case7$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case7$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case7$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case7$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case7$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case7$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case7$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(REP_TARGET == TRUE) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(cm_b %>% filter(REP_TARGET == TRUE)),6)
+  case7$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case7$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+
+case7$CTD[length(df_monthly)]  <- 'Yes'
+case7
+```
+
+
+# % of website visitors that are targets/CVPS of website visitors that are targets
+
+```{r}
+case8 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case8) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case8$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case8$CASE_STUDY_ID <- rep(8, (length(df_monthly)))
+case8$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case8$`WHY/STORY`[1] <- 'We will increase the value of the website'
+case8$DESCRIPTION[1] <- 'Percentage of website visitors that are rep targets, Rep Targets/Total Visitors, G1/G2'
+case8$Measure_Type[1] <- 'Percentage Users'
+
+x1 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly[[1]] %>% filter(View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2 = round(nrow(df_monthly[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(my_program %>% group_by(FP_CUST_ID) %>% summarise(View_Web = sum(View_Web, na.rm = TRUE)) %>% filter(View_Web > 0)),6)
+
+
+
+case8$`METRIC_TOTAL_TARGET (Avg)`[1] <- x2
+case8$`METRIC_MONTH (Avg)`[1] <- x1
+
+
+x1_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(df_monthly_b[[1]] %>% filter(View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+x2_b = round(nrow(df_monthly_b[[1]] %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(my_program_b %>% group_by(FP_CUST_ID) %>% summarise(View_Web = sum(View_Web, na.rm = TRUE)) %>% filter(View_Web > 0)),6)
+
+case8$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[1] <- x2_b
+case8$`METRIC_MONTH (Avg)_NO_OUTLIERS`[1] <- x1_b
+
+g1 <- df_monthly[[1]] %>%  filter(REP_TARGET == TRUE & View_Web > 0)
+g2 <- df_monthly[[1]] %>% filter(View_Web > 0)
+case8$`AVG TRX GROUP_1`[1] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+case8$`AVG TRX GROUP_2`[1] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+case8$`Sum TRX GROUP_1`[1] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+case8$`Sum TRX GROUP_2`[1] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+case8$`COUNTS OF GROUP_1`[1] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+case8$`COUNTS OF GROUP_2`[1] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+case8$TIMEFRAME[1] <- names(df_monthly[1])
+case8$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case8$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case8$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case8$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case8$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case8$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case8$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case8$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case8$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case8$`WHY/STORY`[i] <- 'We will increase the value of the website'
+  case8$DESCRIPTION[i] <- 'Percentage of website visitors that are rep targets, Rep Targets/Total Visitors, G1/G2'
+  case8$Measure_Type[i] <- 'Percentage Users'
+  temp <- rbind(df_monthly[[i]], temp)
+  x1 = round(nrow(temp %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp %>% filter(View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2 = round(nrow(temp %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(my_program %>% group_by(FP_CUST_ID) %>% summarise(View_Web = sum(View_Web, na.rm = TRUE)) %>% filter(View_Web > 0)),6)
+  case8$`METRIC_TOTAL_TARGET (Avg)`[i] <- x2
+  case8$`METRIC_MONTH (Avg)`[i] <- x1
+  g1 <- temp %>% filter(REP_TARGET == TRUE & View_Web > 0)
+  g2 <- temp %>% filter(View_Web > 0)
+  case8$`AVG TRX GROUP_1`[i] <- round((sum(g1$TRX_CNT, na.rm = T)/nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])),4)
+  case8$`AVG TRX GROUP_2`[i] <- round((sum(g2$TRX_CNT, na.rm = T)/nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])),4)
+  case8$`Sum TRX GROUP_1`[i] <- round(sum(g1$TRX_CNT, na.rm = TRUE),1)
+  case8$`Sum TRX GROUP_2`[i] <- round(sum(g2$TRX_CNT, na.rm = TRUE),1)
+  case8$`COUNTS OF GROUP_1`[i] <- nrow(g1[!duplicated(g1[,c('FP_CUST_ID')]),])
+  case8$`COUNTS OF GROUP_2`[i] <- nrow(g2[!duplicated(g2[,c('FP_CUST_ID')]),])
+  case8$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case8$MONTH[i] <- names(df_monthly[i])
+  case8$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case8$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case8$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case8$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case8$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case8$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case8$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case8$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+temp_b <- df_monthly_b[[1]]
+for (i in 2:length(df_monthly_b)) {
+  temp_b <- rbind(df_monthly_b[[i]], temp_b)
+  x1_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(temp_b %>% filter(View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE)),4)
+  x2_b = round(nrow(temp_b %>% filter(REP_TARGET == TRUE & View_Web > 0) %>% distinct_at(vars(FP_CUST_ID), .keep_all = TRUE))/nrow(my_program_b %>% group_by(FP_CUST_ID) %>% summarise(View_Web = sum(View_Web, na.rm = TRUE)) %>% filter(View_Web > 0)),6)
+  case8$`METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS`[i] <- x2_b
+  case8$`METRIC_MONTH (Avg)_NO_OUTLIERS`[i] <- x1_b
+}
+
+case8$CTD[length(df_monthly)]  <- 'Yes'
+case8
+```
+
+# ROI Ratio: Media cost + program fees vs TRx lift from Elevalt (see “Artemis Target Impact Factor” but combined for exposures OR engagements)
+
+```{r}
+case9 <- data.frame(matrix(NA, ncol = 40, nrow = (length(df_monthly))))
+colnames(case9) <- c('PROGRAM','CASE_STUDY_ID','WHY/STORY','DESCRIPTION','Measure_Type','METRIC_TOTAL_TARGET (Avg)','METRIC_MONTH (Avg)','METRIC_MONTH (Sum)','METRIC_TOTAL_TARGET (Avg)_NO_OUTLIERS','METRIC_MONTH (Avg)_NO_OUTLIERS','METRIC_MONTH (Sum)_NO_OUTLIERS','AVG TRX GROUP_1', 'AVG TRX GROUP_2',	'Sum TRX GROUP_1','Sum TRX GROUP_2','COUNTS OF GROUP_1','COUNTS OF GROUP_2','TIMEFRAME','TOTAL_UNIVERSE','TOTAL_Field_TARGETS','TOTAL_ElevaltOnly_TARGETS','TOTAL_ElevaltShared_TARGETS','Total_Target_Universe', 'TOTAL_RX','TOTAL_EXPOSURE',	'TOTAL_ENGAGEMENT',	'MONTH','MONTHS_NUMBERS','CTD','PDE(Exposure/TRX)','PDE(Engagement/TRX)', 'PDE(CALL/TRX)','PDE(Exposure/Call)','PDE(Engagement/Call)', 'coefficient_Engagement','coefficient_Exposure','coefficient_Call', 'Pvalue_Engagement','Pvalue_Exposure','Pvalue_Call')
+
+case9$PROGRAM[1:(length(df_monthly))] <- "Valtoco"
+case9$CASE_STUDY_ID <- rep(9, (length(df_monthly)))
+case9$MONTHS_NUMBERS <- c(1:(length(df_monthly)))
+
+
+case9$`WHY/STORY`[1] <- 'Financial impact of investment'
+case9$DESCRIPTION[1] <- 'ROI Ratio: Media cost + program fees vs TRx lift from Elevalt'
+case9$Measure_Type[1] <- 'Number'
+exp <- case1.3 %>% filter(MONTHS_NUMBERS == 13) 
+incremnental_impact <- round(exp$`METRIC_MONTH (Avg)`,4)
+TRX_NPP_Rep <- sum(exp$`Sum TRX GROUP_1`, na.rm = TRUE)
+No_NPP <- (TRX_NPP_Rep/(1+incremnental_impact))
+NPP_TRx <- (TRX_NPP_Rep-No_NPP)
+NPP_Only <- case3.2 %>% filter(MONTHS_NUMBERS == 13)
+TRx_NPP_Only <- sum(NPP_Only$`Sum TRX GROUP_1`, na.rm = TRUE)
+NPP_Groups <- (NPP_TRx+TRx_NPP_Only)
+program_cost <- 1258605
+WAC <- 623.28
+gross = (NPP_Groups*WAC)
+ROI = (gross/program_cost)*100
+case9$`METRIC_MONTH (Avg)`[1] <- round(ROI)
+
+case9$TIMEFRAME[1] <- names(df_monthly[1])
+case9$TOTAL_UNIVERSE[1] <- nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),])
+case9$TOTAL_Field_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+case9$TOTAL_ElevaltOnly_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+case9$TOTAL_ElevaltShared_TARGETS[1] <-  nrow(df_monthly[[1]][!duplicated(df_monthly[[1]][,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+case9$Total_Target_Universe[1] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+case9$TOTAL_RX[1] <- round(sum(df_monthly[[1]]$TRX_CNT, na.rm = TRUE),1)
+case9$TOTAL_EXPOSURE[1] <- sum(df_monthly[[1]]$Exposure, na.rm = TRUE)
+case9$TOTAL_ENGAGEMENT[1] <- sum(df_monthly[[1]]$Engagement, na.rm = TRUE)
+case9$MONTH[1] <- names(df_monthly[1])
+
+
+temp <- df_monthly[[1]]
+for (i in 2:length(df_monthly)) {
+  case9$`WHY/STORY`[i] <- 'Financial impact of investment'
+  case9$DESCRIPTION[i] <- 'ROI Ratio: Media cost + program fees vs TRx lift from Elevalt'
+  case9$Measure_Type[i] <- 'Number'
+  temp <- rbind(df_monthly[[i]], temp)
+  
+  exp <- case1.3 %>% filter(MONTHS_NUMBERS == 13) 
+  incremnental_impact <- round(exp$`METRIC_MONTH (Avg)`,4)
+  TRX_NPP_Rep <- sum(exp$`Sum TRX GROUP_1`, na.rm = TRUE)
+  No_NPP <- (TRX_NPP_Rep/(1+incremnental_impact))
+  NPP_TRx <- (TRX_NPP_Rep-No_NPP)
+  NPP_Only <- case3.2 %>% filter(MONTHS_NUMBERS == 13)
+  TRx_NPP_Only <- sum(NPP_Only$`Sum TRX GROUP_1`, na.rm = TRUE)
+  NPP_Groups <- (NPP_TRx+TRx_NPP_Only)
+  program_cost <- 1258605
+  WAC <- 623.28
+  gross = (NPP_Groups*WAC)
+  ROI = (gross/program_cost)*100
+  case9$`METRIC_MONTH (Avg)`[i] <- round(ROI)
+
+  case9$TIMEFRAME[i] <- paste(names(df_monthly[1]),'To', names(df_monthly[i]))
+  case9$MONTH[i] <- names(df_monthly[i])
+  case9$TOTAL_UNIVERSE[i] <- nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),])
+  case9$TOTAL_Field_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE))
+  case9$TOTAL_ElevaltOnly_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == FALSE & NPP_TARGET == TRUE))
+  case9$TOTAL_ElevaltShared_TARGETS[i] <-  nrow(temp[!duplicated(temp[,c('FP_CUST_ID')]),] %>% filter(REP_TARGET == TRUE & NPP_TARGET == TRUE))
+  case9$Total_Target_Universe[i] <- nrow(cm %>% filter(REP_TARGET == TRUE))
+  case9$TOTAL_RX[i] <- round(sum(temp$TRX_CNT, na.rm = TRUE),1)
+  case9$TOTAL_EXPOSURE[i] <- sum(temp$Exposure, na.rm = TRUE)
+  case9$TOTAL_ENGAGEMENT[i] <- sum(temp$Engagement, na.rm = TRUE)
+}
+
+
+case9$CTD[length(df_monthly)] <- 'Yes'
+case9
+
+```
+
+```{r}
+cases_valtoco <- rbind(case1, case1.1, case1.2, case1.3, case2, case3, case3.1, case3.2, case4, case5, case5.1, case5.2, case6, case6.1, case7, case8, case9)
+names(cases_valtoco) <- toupper(names(cases_valtoco))
+cases_valtoco[,c(6:40)][is.na(cases_valtoco[,c(6:40)])] <- ""
+#cases[,c(5)][is.nan(cases[,c(5)])] <- 0
+cases_valtoco
+```
+
+```{r}
+write.csv(cases_valtoco, '~/Desktop/CaseStudy_Valtoco_10-12-23.csv', row.names = FALSE)
+```
+
+
